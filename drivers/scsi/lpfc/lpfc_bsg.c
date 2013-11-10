@@ -1,7 +1,7 @@
 /*******************************************************************
  * This file is part of the Emulex Linux Device Driver for         *
  * Fibre Channel Host Bus Adapters.                                *
- * Copyright (C) 2009-2012 Emulex.  All rights reserved.           *
+ * Copyright (C) 2009-2013 Emulex.  All rights reserved.           *
  * EMULEX and SLI are trademarks of Emulex.                        *
  * www.emulex.com                                                  *
  *                                                                 *
@@ -219,26 +219,35 @@ lpfc_bsg_copy_data(struct lpfc_dmabuf *dma_buffers,
 	unsigned int transfer_bytes, bytes_copied = 0;
 	unsigned int sg_offset, dma_offset;
 	unsigned char *dma_address, *sg_address;
-	struct scatterlist *sgel;
 	LIST_HEAD(temp_list);
-
+	struct sg_mapping_iter miter;
+	unsigned long flags;
+	unsigned int sg_flags = SG_MITER_ATOMIC;
+	bool sg_valid;
 
 	list_splice_init(&dma_buffers->list, &temp_list);
 	list_add(&dma_buffers->list, &temp_list);
 	sg_offset = 0;
-	sgel = bsg_buffers->sg_list;
+	if (to_buffers)
+		sg_flags |= SG_MITER_FROM_SG;
+	else
+		sg_flags |= SG_MITER_TO_SG;
+	sg_miter_start(&miter, bsg_buffers->sg_list, bsg_buffers->sg_cnt,
+		       sg_flags);
+	local_irq_save(flags);
+	sg_valid = sg_miter_next(&miter);
 	list_for_each_entry(mp, &temp_list, list) {
 		dma_offset = 0;
-		while (bytes_to_transfer && sgel &&
+		while (bytes_to_transfer && sg_valid &&
 		       (dma_offset < LPFC_BPL_SIZE)) {
 			dma_address = mp->virt + dma_offset;
 			if (sg_offset) {
 				/* Continue previous partial transfer of sg */
-				sg_address = sg_virt(sgel) + sg_offset;
-				transfer_bytes = sgel->length - sg_offset;
+				sg_address = miter.addr + sg_offset;
+				transfer_bytes = miter.length - sg_offset;
 			} else {
-				sg_address = sg_virt(sgel);
-				transfer_bytes = sgel->length;
+				sg_address = miter.addr;
+				transfer_bytes = miter.length;
 			}
 			if (bytes_to_transfer < transfer_bytes)
 				transfer_bytes = bytes_to_transfer;
@@ -252,12 +261,14 @@ lpfc_bsg_copy_data(struct lpfc_dmabuf *dma_buffers,
 			sg_offset += transfer_bytes;
 			bytes_to_transfer -= transfer_bytes;
 			bytes_copied += transfer_bytes;
-			if (sg_offset >= sgel->length) {
+			if (sg_offset >= miter.length) {
 				sg_offset = 0;
-				sgel = sg_next(sgel);
+				sg_valid = sg_miter_next(&miter);
 			}
 		}
 	}
+	sg_miter_stop(&miter);
+	local_irq_restore(flags);
 	list_del_init(&dma_buffers->list);
 	list_splice(&temp_list, &dma_buffers->list);
 	return bytes_copied;
@@ -305,6 +316,11 @@ lpfc_bsg_send_mgmt_cmd_cmp(struct lpfc_hba *phba,
 		job->dd_data = NULL;
 	}
 	spin_unlock_irqrestore(&phba->ct_ev_lock, flags);
+
+	/* Close the timeout handler abort window */
+	spin_lock_irqsave(&phba->hbalock, flags);
+	cmdiocbq->iocb_flag &= ~LPFC_IO_CMD_OUTSTANDING;
+	spin_unlock_irqrestore(&phba->hbalock, flags);
 
 	iocb = &dd_data->context_un.iocb;
 	ndlp = iocb->ndlp;
@@ -376,6 +392,7 @@ lpfc_bsg_send_mgmt_cmd(struct fc_bsg_job *job)
 	int request_nseg;
 	int reply_nseg;
 	struct bsg_job_data *dd_data;
+	unsigned long flags;
 	uint32_t creg_val;
 	int rc = 0;
 	int iocb_stat;
@@ -471,6 +488,7 @@ lpfc_bsg_send_mgmt_cmd(struct fc_bsg_job *job)
 	cmdiocbq->context1 = dd_data;
 	cmdiocbq->context2 = cmp;
 	cmdiocbq->context3 = bmp;
+	cmdiocbq->context_un.ndlp = ndlp;
 	dd_data->type = TYPE_IOCB;
 	dd_data->set_job = job;
 	dd_data->context_un.iocb.cmdiocbq = cmdiocbq;
@@ -489,14 +507,24 @@ lpfc_bsg_send_mgmt_cmd(struct fc_bsg_job *job)
 	}
 
 	iocb_stat = lpfc_sli_issue_iocb(phba, LPFC_ELS_RING, cmdiocbq, 0);
-	if (iocb_stat == IOCB_SUCCESS)
+
+	if (iocb_stat == IOCB_SUCCESS) {
+		spin_lock_irqsave(&phba->hbalock, flags);
+		/* make sure the I/O had not been completed yet */
+		if (cmdiocbq->iocb_flag & LPFC_IO_LIBDFC) {
+			/* open up abort window to timeout handler */
+			cmdiocbq->iocb_flag |= LPFC_IO_CMD_OUTSTANDING;
+		}
+		spin_unlock_irqrestore(&phba->hbalock, flags);
 		return 0; /* done for now */
-	else if (iocb_stat == IOCB_BUSY)
+	} else if (iocb_stat == IOCB_BUSY) {
 		rc = -EAGAIN;
-	else
+	} else {
 		rc = -EIO;
+	}
 
 	/* iocb failed so cleanup */
+	job->dd_data = NULL;
 
 free_rmp:
 	lpfc_free_bsg_buffers(phba, rmp);
@@ -565,6 +593,11 @@ lpfc_bsg_rport_els_cmp(struct lpfc_hba *phba,
 	}
 	spin_unlock_irqrestore(&phba->ct_ev_lock, flags);
 
+	/* Close the timeout handler abort window */
+	spin_lock_irqsave(&phba->hbalock, flags);
+	cmdiocbq->iocb_flag &= ~LPFC_IO_CMD_OUTSTANDING;
+	spin_unlock_irqrestore(&phba->hbalock, flags);
+
 	rsp = &rspiocbq->iocb;
 	pcmd = (struct lpfc_dmabuf *)cmdiocbq->context2;
 	prsp = (struct lpfc_dmabuf *)pcmd->list.next;
@@ -627,6 +660,7 @@ lpfc_bsg_rport_els(struct fc_bsg_job *job)
 	struct lpfc_iocbq *cmdiocbq;
 	uint16_t rpi = 0;
 	struct bsg_job_data *dd_data;
+	unsigned long flags;
 	uint32_t creg_val;
 	int rc = 0;
 
@@ -709,15 +743,25 @@ lpfc_bsg_rport_els(struct fc_bsg_job *job)
 
 	rc = lpfc_sli_issue_iocb(phba, LPFC_ELS_RING, cmdiocbq, 0);
 
-	if (rc == IOCB_SUCCESS)
+	if (rc == IOCB_SUCCESS) {
+		spin_lock_irqsave(&phba->hbalock, flags);
+		/* make sure the I/O had not been completed/released */
+		if (cmdiocbq->iocb_flag & LPFC_IO_LIBDFC) {
+			/* open up abort window to timeout handler */
+			cmdiocbq->iocb_flag |= LPFC_IO_CMD_OUTSTANDING;
+		}
+		spin_unlock_irqrestore(&phba->hbalock, flags);
 		return 0; /* done for now */
-	else if (rc == IOCB_BUSY)
+	} else if (rc == IOCB_BUSY) {
 		rc = -EAGAIN;
-	else
+	} else {
 		rc = -EIO;
+	}
+
+	/* iocb failed so cleanup */
+	job->dd_data = NULL;
 
 linkdown_err:
-
 	cmdiocbq->context1 = ndlp;
 	lpfc_els_free_iocb(phba, cmdiocbq);
 
@@ -1237,7 +1281,7 @@ lpfc_bsg_hba_get_event(struct fc_bsg_job *job)
 	struct lpfc_hba *phba = vport->phba;
 	struct get_ct_event *event_req;
 	struct get_ct_event_reply *event_reply;
-	struct lpfc_bsg_event *evt;
+	struct lpfc_bsg_event *evt, *evt_next;
 	struct event_data *evt_dat = NULL;
 	unsigned long flags;
 	uint32_t rc = 0;
@@ -1257,7 +1301,7 @@ lpfc_bsg_hba_get_event(struct fc_bsg_job *job)
 	event_reply = (struct get_ct_event_reply *)
 		job->reply->reply_data.vendor_reply.vendor_rsp;
 	spin_lock_irqsave(&phba->ct_ev_lock, flags);
-	list_for_each_entry(evt, &phba->ct_ev_waiters, node) {
+	list_for_each_entry_safe(evt, evt_next, &phba->ct_ev_waiters, node) {
 		if (evt->reg_id == event_req->ev_reg_id) {
 			if (list_empty(&evt->events_to_get))
 				break;
@@ -1358,6 +1402,11 @@ lpfc_issue_ct_rsp_cmp(struct lpfc_hba *phba,
 	}
 	spin_unlock_irqrestore(&phba->ct_ev_lock, flags);
 
+	/* Close the timeout handler abort window */
+	spin_lock_irqsave(&phba->hbalock, flags);
+	cmdiocbq->iocb_flag &= ~LPFC_IO_CMD_OUTSTANDING;
+	spin_unlock_irqrestore(&phba->hbalock, flags);
+
 	ndlp = dd_data->context_un.iocb.ndlp;
 	cmp = cmdiocbq->context2;
 	bmp = cmdiocbq->context3;
@@ -1421,6 +1470,7 @@ lpfc_issue_ct_rsp(struct lpfc_hba *phba, struct fc_bsg_job *job, uint32_t tag,
 	int rc = 0;
 	struct lpfc_nodelist *ndlp = NULL;
 	struct bsg_job_data *dd_data;
+	unsigned long flags;
 	uint32_t creg_val;
 
 	/* allocate our bsg tracking structure */
@@ -1508,6 +1558,7 @@ lpfc_issue_ct_rsp(struct lpfc_hba *phba, struct fc_bsg_job *job, uint32_t tag,
 	ctiocb->context1 = dd_data;
 	ctiocb->context2 = cmp;
 	ctiocb->context3 = bmp;
+	ctiocb->context_un.ndlp = ndlp;
 	ctiocb->iocb_cmpl = lpfc_issue_ct_rsp_cmp;
 
 	dd_data->type = TYPE_IOCB;
@@ -1529,8 +1580,19 @@ lpfc_issue_ct_rsp(struct lpfc_hba *phba, struct fc_bsg_job *job, uint32_t tag,
 
 	rc = lpfc_sli_issue_iocb(phba, LPFC_ELS_RING, ctiocb, 0);
 
-	if (rc == IOCB_SUCCESS)
+	if (rc == IOCB_SUCCESS) {
+		spin_lock_irqsave(&phba->hbalock, flags);
+		/* make sure the I/O had not been completed/released */
+		if (ctiocb->iocb_flag & LPFC_IO_LIBDFC) {
+			/* open up abort window to timeout handler */
+			ctiocb->iocb_flag |= LPFC_IO_CMD_OUTSTANDING;
+		}
+		spin_unlock_irqrestore(&phba->hbalock, flags);
 		return 0; /* done for now */
+	}
+
+	/* iocb failed so cleanup */
+	job->dd_data = NULL;
 
 issue_ct_rsp_exit:
 	lpfc_sli_release_iocbq(phba, ctiocb);
@@ -2485,7 +2547,7 @@ static int lpfcdiag_loop_get_xri(struct lpfc_hba *phba, uint16_t rpi,
 	struct lpfc_sli_ct_request *ctreq = NULL;
 	int ret_val = 0;
 	int time_left;
-	int iocb_stat = 0;
+	int iocb_stat = IOCB_SUCCESS;
 	unsigned long flags;
 
 	*txxri = 0;
@@ -2561,6 +2623,7 @@ static int lpfcdiag_loop_get_xri(struct lpfc_hba *phba, uint16_t rpi,
 
 	cmdiocbq->iocb_flag |= LPFC_IO_LIBDFC;
 	cmdiocbq->vport = phba->pport;
+	cmdiocbq->iocb_cmpl = NULL;
 
 	iocb_stat = lpfc_sli_issue_iocb_wait(phba, LPFC_ELS_RING, cmdiocbq,
 				rspiocbq,
@@ -2576,7 +2639,8 @@ static int lpfcdiag_loop_get_xri(struct lpfc_hba *phba, uint16_t rpi,
 	evt->wait_time_stamp = jiffies;
 	time_left = wait_event_interruptible_timeout(
 		evt->wq, !list_empty(&evt->events_to_see),
-		((phba->fc_ratov * 2) + LPFC_DRVR_TIMEOUT) * HZ);
+		msecs_to_jiffies(1000 *
+			((phba->fc_ratov * 2) + LPFC_DRVR_TIMEOUT)));
 	if (list_empty(&evt->events_to_see))
 		ret_val = (time_left) ? -EINTR : -ETIMEDOUT;
 	else {
@@ -2613,7 +2677,7 @@ err_get_xri_exit:
  * @phba: Pointer to HBA context object
  *
  * This function allocates BSG_MBOX_SIZE (4KB) page size dma buffer and.
- * retruns the pointer to the buffer.
+ * returns the pointer to the buffer.
  **/
 static struct lpfc_dmabuf *
 lpfc_bsg_dma_page_alloc(struct lpfc_hba *phba)
@@ -2949,7 +3013,7 @@ lpfc_bsg_diag_loopback_run(struct fc_bsg_job *job)
 	uint8_t *ptr = NULL, *rx_databuf = NULL;
 	int rc = 0;
 	int time_left;
-	int iocb_stat;
+	int iocb_stat = IOCB_SUCCESS;
 	unsigned long flags;
 	void *dataout = NULL;
 	uint32_t total_mem;
@@ -3135,6 +3199,7 @@ lpfc_bsg_diag_loopback_run(struct fc_bsg_job *job)
 	}
 	cmdiocbq->iocb_flag |= LPFC_IO_LIBDFC;
 	cmdiocbq->vport = phba->pport;
+	cmdiocbq->iocb_cmpl = NULL;
 	iocb_stat = lpfc_sli_issue_iocb_wait(phba, LPFC_ELS_RING, cmdiocbq,
 					     rspiocbq, (phba->fc_ratov * 2) +
 					     LPFC_DRVR_TIMEOUT);
@@ -3151,7 +3216,8 @@ lpfc_bsg_diag_loopback_run(struct fc_bsg_job *job)
 	evt->waiting = 1;
 	time_left = wait_event_interruptible_timeout(
 		evt->wq, !list_empty(&evt->events_to_see),
-		((phba->fc_ratov * 2) + LPFC_DRVR_TIMEOUT) * HZ);
+		msecs_to_jiffies(1000 *
+			((phba->fc_ratov * 2) + LPFC_DRVR_TIMEOUT)));
 	evt->waiting = 0;
 	if (list_empty(&evt->events_to_see)) {
 		rc = (time_left) ? -EINTR : -ETIMEDOUT;
@@ -3194,7 +3260,7 @@ err_loopback_test_exit:
 	lpfc_bsg_event_unref(evt); /* delete */
 	spin_unlock_irqrestore(&phba->ct_ev_lock, flags);
 
-	if (cmdiocbq != NULL)
+	if ((cmdiocbq != NULL) && (iocb_stat != IOCB_TIMEDOUT))
 		lpfc_sli_release_iocbq(phba, cmdiocbq);
 
 	if (rspiocbq != NULL)
@@ -3377,6 +3443,7 @@ static int lpfc_bsg_check_cmd_access(struct lpfc_hba *phba,
 	case MBX_DOWN_LOAD:
 	case MBX_UPDATE_CFG:
 	case MBX_KILL_BOARD:
+	case MBX_READ_TOPOLOGY:
 	case MBX_LOAD_AREA:
 	case MBX_LOAD_EXP_ROM:
 	case MBX_BEACON:
@@ -3407,7 +3474,6 @@ static int lpfc_bsg_check_cmd_access(struct lpfc_hba *phba,
 		}
 		break;
 	case MBX_READ_SPARM64:
-	case MBX_READ_TOPOLOGY:
 	case MBX_REG_LOGIN:
 	case MBX_REG_LOGIN64:
 	case MBX_CONFIG_PORT:
@@ -5267,9 +5333,15 @@ lpfc_bsg_timeout(struct fc_bsg_job *job)
 		 * remove it from the txq queue and call cancel iocbs.
 		 * Otherwise, call abort iotag
 		 */
-
 		cmdiocb = dd_data->context_un.iocb.cmdiocbq;
-		spin_lock_irq(&phba->hbalock);
+		spin_unlock_irqrestore(&phba->ct_ev_lock, flags);
+
+		spin_lock_irqsave(&phba->hbalock, flags);
+		/* make sure the I/O abort window is still open */
+		if (!(cmdiocb->iocb_flag & LPFC_IO_CMD_OUTSTANDING)) {
+			spin_unlock_irqrestore(&phba->hbalock, flags);
+			return -EAGAIN;
+		}
 		list_for_each_entry_safe(check_iocb, next_iocb, &pring->txq,
 					 list) {
 			if (check_iocb == cmdiocb) {
@@ -5279,8 +5351,7 @@ lpfc_bsg_timeout(struct fc_bsg_job *job)
 		}
 		if (list_empty(&completions))
 			lpfc_sli_issue_abort_iotag(phba, pring, cmdiocb);
-		spin_unlock_irq(&phba->hbalock);
-		spin_unlock_irqrestore(&phba->ct_ev_lock, flags);
+		spin_unlock_irqrestore(&phba->hbalock, flags);
 		if (!list_empty(&completions)) {
 			lpfc_sli_cancel_iocbs(phba, &completions,
 					      IOSTAT_LOCAL_REJECT,
@@ -5304,9 +5375,10 @@ lpfc_bsg_timeout(struct fc_bsg_job *job)
 		 * remove it from the txq queue and call cancel iocbs.
 		 * Otherwise, call abort iotag.
 		 */
-
 		cmdiocb = dd_data->context_un.menlo.cmdiocbq;
-		spin_lock_irq(&phba->hbalock);
+		spin_unlock_irqrestore(&phba->ct_ev_lock, flags);
+
+		spin_lock_irqsave(&phba->hbalock, flags);
 		list_for_each_entry_safe(check_iocb, next_iocb, &pring->txq,
 					 list) {
 			if (check_iocb == cmdiocb) {
@@ -5316,8 +5388,7 @@ lpfc_bsg_timeout(struct fc_bsg_job *job)
 		}
 		if (list_empty(&completions))
 			lpfc_sli_issue_abort_iotag(phba, pring, cmdiocb);
-		spin_unlock_irq(&phba->hbalock);
-		spin_unlock_irqrestore(&phba->ct_ev_lock, flags);
+		spin_unlock_irqrestore(&phba->hbalock, flags);
 		if (!list_empty(&completions)) {
 			lpfc_sli_cancel_iocbs(phba, &completions,
 					      IOSTAT_LOCAL_REJECT,

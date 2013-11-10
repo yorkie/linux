@@ -60,7 +60,12 @@ struct devalarm {
 
 static struct devalarm alarms[ANDROID_ALARM_TYPE_COUNT];
 
-
+/**
+ * is_wakeup() - Checks to see if this alarm can wake the device
+ * @type:	 The type of alarm being checked
+ *
+ * Return: 1 if this is a wakeup alarm, otherwise 0
+ */
 static int is_wakeup(enum android_alarm_type type)
 {
 	return (type == ANDROID_ALARM_RTC_WAKEUP ||
@@ -75,7 +80,6 @@ static void devalarm_start(struct devalarm *alrm, ktime_t exp)
 	else
 		hrtimer_start(&alrm->u.hrt, exp, HRTIMER_MODE_ABS);
 }
-
 
 static int devalarm_try_to_cancel(struct devalarm *alrm)
 {
@@ -264,6 +268,8 @@ static long alarm_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 	}
 
 	rv = alarm_do_ioctl(file, cmd, &ts);
+	if (rv)
+		return rv;
 
 	switch (ANDROID_ALARM_BASE_CMD(cmd)) {
 	case ANDROID_ALARM_GET_TIME(0):
@@ -272,7 +278,7 @@ static long alarm_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 		break;
 	}
 
-	return rv;
+	return 0;
 }
 #ifdef CONFIG_COMPAT
 static long alarm_compat_ioctl(struct file *file, unsigned int cmd,
@@ -295,6 +301,8 @@ static long alarm_compat_ioctl(struct file *file, unsigned int cmd,
 	}
 
 	rv = alarm_do_ioctl(file, cmd, &ts);
+	if (rv)
+		return rv;
 
 	switch (ANDROID_ALARM_BASE_CMD(cmd)) {
 	case ANDROID_ALARM_GET_TIME(0): /* NOTE: we modified cmd above */
@@ -303,7 +311,7 @@ static long alarm_compat_ioctl(struct file *file, unsigned int cmd,
 		break;
 	}
 
-	return rv;
+	return 0;
 }
 #endif
 

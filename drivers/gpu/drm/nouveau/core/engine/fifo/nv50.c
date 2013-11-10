@@ -26,7 +26,6 @@
 #include <core/engctx.h>
 #include <core/ramht.h>
 #include <core/class.h>
-#include <core/math.h>
 
 #include <subdev/timer.h>
 #include <subdev/bar.h>
@@ -40,8 +39,8 @@
  * FIFO channel objects
  ******************************************************************************/
 
-void
-nv50_fifo_playlist_update(struct nv50_fifo_priv *priv)
+static void
+nv50_fifo_playlist_update_locked(struct nv50_fifo_priv *priv)
 {
 	struct nouveau_bar *bar = nouveau_bar(priv);
 	struct nouveau_gpuobj *cur;
@@ -60,6 +59,14 @@ nv50_fifo_playlist_update(struct nv50_fifo_priv *priv)
 	nv_wr32(priv, 0x0032f4, cur->addr >> 12);
 	nv_wr32(priv, 0x0032ec, p);
 	nv_wr32(priv, 0x002500, 0x00000101);
+}
+
+void
+nv50_fifo_playlist_update(struct nv50_fifo_priv *priv)
+{
+	mutex_lock(&nv_subdev(priv)->mutex);
+	nv50_fifo_playlist_update_locked(priv);
+	mutex_unlock(&nv_subdev(priv)->mutex);
 }
 
 static int
@@ -270,7 +277,7 @@ nv50_fifo_chan_ctor_ind(struct nouveau_object *parent,
 		return ret;
 
 	ioffset = args->ioffset;
-	ilength = log2i(args->ilength / 8);
+	ilength = order_base_2(args->ilength / 8);
 
 	nv_wo32(base->ramfc, 0x3c, 0x403f6078);
 	nv_wo32(base->ramfc, 0x44, 0x01003fff);
@@ -487,7 +494,7 @@ nv50_fifo_init(struct nouveau_object *object)
 
 	for (i = 0; i < 128; i++)
 		nv_wr32(priv, 0x002600 + (i * 4), 0x00000000);
-	nv50_fifo_playlist_update(priv);
+	nv50_fifo_playlist_update_locked(priv);
 
 	nv_wr32(priv, 0x003200, 0x00000001);
 	nv_wr32(priv, 0x003250, 0x00000001);

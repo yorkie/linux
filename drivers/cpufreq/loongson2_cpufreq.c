@@ -18,6 +18,7 @@
 #include <linux/platform_device.h>
 
 #include <asm/clock.h>
+#include <asm/idle.h>
 
 #include <asm/mach-loongson/loongson.h>
 
@@ -71,7 +72,7 @@ static int loongson2_cpufreq_target(struct cpufreq_policy *policy,
 
 	freq =
 	    ((cpu_clock_freq / 1000) *
-	     loongson2_clockmod_table[newstate].index) / 8;
+	     loongson2_clockmod_table[newstate].driver_data) / 8;
 	if (freq < policy->min || freq > policy->max)
 		return -EINVAL;
 
@@ -117,17 +118,18 @@ static int loongson2_cpufreq_cpu_init(struct cpufreq_policy *policy)
 		clk_put(cpuclk);
 		return -EINVAL;
 	}
-	ret = clk_set_rate(cpuclk, rate);
-	if (ret) {
-		clk_put(cpuclk);
-		return ret;
-	}
 
 	/* clock table init */
 	for (i = 2;
 	     (loongson2_clockmod_table[i].frequency != CPUFREQ_TABLE_END);
 	     i++)
 		loongson2_clockmod_table[i].frequency = (rate * i) / 8;
+
+	ret = clk_set_rate(cpuclk, rate);
+	if (ret) {
+		clk_put(cpuclk);
+		return ret;
+	}
 
 	policy->cur = loongson2_cpufreq_get(policy->cpu);
 
@@ -156,7 +158,6 @@ static struct freq_attr *loongson2_table_attr[] = {
 };
 
 static struct cpufreq_driver loongson2_cpufreq_driver = {
-	.owner = THIS_MODULE,
 	.name = "loongson2",
 	.init = loongson2_cpufreq_cpu_init,
 	.verify = loongson2_cpufreq_verify,
@@ -200,6 +201,7 @@ static void loongson2_cpu_wait(void)
 	LOONGSON_CHIPCFG0 &= ~0x7;	/* Put CPU into wait mode */
 	LOONGSON_CHIPCFG0 = cpu_freq;	/* Restore CPU state */
 	spin_unlock_irqrestore(&loongson2_wait_lock, flags);
+	local_irq_enable();
 }
 
 static int __init cpufreq_init(void)

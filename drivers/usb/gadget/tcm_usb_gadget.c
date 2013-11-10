@@ -472,7 +472,7 @@ static int usbg_bot_setup(struct usb_function *f,
 		bot_enqueue_cmd_cbw(fu);
 		return 0;
 		break;
-	};
+	}
 	return -ENOTSUPP;
 }
 
@@ -617,7 +617,7 @@ static void uasp_status_data_cmpl(struct usb_ep *ep, struct usb_request *req)
 
 	default:
 		BUG();
-	};
+	}
 	return;
 
 cleanup:
@@ -1467,9 +1467,8 @@ static int usbg_get_cmd_state(struct se_cmd *se_cmd)
 	return 0;
 }
 
-static int usbg_queue_tm_rsp(struct se_cmd *se_cmd)
+static void usbg_queue_tm_rsp(struct se_cmd *se_cmd)
 {
-	return 0;
 }
 
 static const char *usbg_check_wwn(const char *name)

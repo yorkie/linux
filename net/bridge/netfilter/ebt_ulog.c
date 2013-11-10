@@ -131,14 +131,16 @@ static struct sk_buff *ulog_alloc_skb(unsigned int size)
 	return skb;
 }
 
-static void ebt_ulog_packet(unsigned int hooknr, const struct sk_buff *skb,
-   const struct net_device *in, const struct net_device *out,
-   const struct ebt_ulog_info *uloginfo, const char *prefix)
+static void ebt_ulog_packet(struct net *net, unsigned int hooknr,
+			    const struct sk_buff *skb,
+			    const struct net_device *in,
+			    const struct net_device *out,
+			    const struct ebt_ulog_info *uloginfo,
+			    const char *prefix)
 {
 	ebt_ulog_packet_msg_t *pm;
 	size_t size, copy_len;
 	struct nlmsghdr *nlh;
-	struct net *net = dev_net(in ? in : out);
 	struct ebt_ulog_net *ebt = ebt_ulog_pernet(net);
 	unsigned int group = uloginfo->nlgroup;
 	ebt_ulog_buff_t *ub = &ebt->ulog_buffers[group];
@@ -179,6 +181,7 @@ static void ebt_ulog_packet(unsigned int hooknr, const struct sk_buff *skb,
 	ub->qlen++;
 
 	pm = nlmsg_data(nlh);
+	memset(pm, 0, sizeof(*pm));
 
 	/* Fill in the ulog data */
 	pm->version = EBT_ULOG_VERSION;
@@ -191,8 +194,6 @@ static void ebt_ulog_packet(unsigned int hooknr, const struct sk_buff *skb,
 	pm->hook = hooknr;
 	if (uloginfo->prefix != NULL)
 		strcpy(pm->prefix, uloginfo->prefix);
-	else
-		*(pm->prefix) = '\0';
 
 	if (in) {
 		strcpy(pm->physindev, in->name);
@@ -202,16 +203,14 @@ static void ebt_ulog_packet(unsigned int hooknr, const struct sk_buff *skb,
 			strcpy(pm->indev, br_port_get_rcu(in)->br->dev->name);
 		else
 			strcpy(pm->indev, in->name);
-	} else
-		pm->indev[0] = pm->physindev[0] = '\0';
+	}
 
 	if (out) {
 		/* If out exists, then out is a bridge port */
 		strcpy(pm->physoutdev, out->name);
 		/* rcu_read_lock()ed by nf_hook_slow */
 		strcpy(pm->outdev, br_port_get_rcu(out)->br->dev->name);
-	} else
-		pm->outdev[0] = pm->physoutdev[0] = '\0';
+	}
 
 	if (skb_copy_bits(skb, -ETH_HLEN, pm->data, copy_len) < 0)
 		BUG();
@@ -233,7 +232,7 @@ unlock:
 }
 
 /* this function is registered with the netfilter core */
-static void ebt_log_packet(u_int8_t pf, unsigned int hooknum,
+static void ebt_log_packet(struct net *net, u_int8_t pf, unsigned int hooknum,
    const struct sk_buff *skb, const struct net_device *in,
    const struct net_device *out, const struct nf_loginfo *li,
    const char *prefix)
@@ -252,13 +251,15 @@ static void ebt_log_packet(u_int8_t pf, unsigned int hooknum,
 		strlcpy(loginfo.prefix, prefix, sizeof(loginfo.prefix));
 	}
 
-	ebt_ulog_packet(hooknum, skb, in, out, &loginfo, prefix);
+	ebt_ulog_packet(net, hooknum, skb, in, out, &loginfo, prefix);
 }
 
 static unsigned int
 ebt_ulog_tg(struct sk_buff *skb, const struct xt_action_param *par)
 {
-	ebt_ulog_packet(par->hooknum, skb, par->in, par->out,
+	struct net *net = dev_net(par->in ? par->in : par->out);
+
+	ebt_ulog_packet(net, par->hooknum, skb, par->in, par->out,
 	                par->targinfo, NULL);
 	return EBT_CONTINUE;
 }
@@ -266,6 +267,12 @@ ebt_ulog_tg(struct sk_buff *skb, const struct xt_action_param *par)
 static int ebt_ulog_tg_check(const struct xt_tgchk_param *par)
 {
 	struct ebt_ulog_info *uloginfo = par->targinfo;
+
+	if (!par->net->xt.ebt_ulog_warn_deprecated) {
+		pr_info("ebt_ulog is deprecated and it will be removed soon, "
+			"use ebt_nflog instead\n");
+		par->net->xt.ebt_ulog_warn_deprecated = true;
+	}
 
 	if (uloginfo->nlgroup > 31)
 		return -EINVAL;

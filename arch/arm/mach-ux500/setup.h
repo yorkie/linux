@@ -11,14 +11,17 @@
 #ifndef __ASM_ARCH_SETUP_H
 #define __ASM_ARCH_SETUP_H
 
+#include <asm/mach/arch.h>
 #include <asm/mach/time.h>
 #include <linux/init.h>
 #include <linux/mfd/abx500/ab8500.h>
 
+void ux500_restart(enum reboot_mode mode, const char *cmd);
+
 void __init ux500_map_io(void);
 extern void __init u8500_map_io(void);
 
-extern struct device * __init u8500_init_devices(struct ab8500_platform_data *ab8500);
+extern struct device * __init u8500_init_devices(void);
 
 extern void __init ux500_init_irq(void);
 extern void __init ux500_init_late(void);

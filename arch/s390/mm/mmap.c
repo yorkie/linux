@@ -91,11 +91,9 @@ void arch_pick_mmap_layout(struct mm_struct *mm)
 	if (mmap_is_legacy()) {
 		mm->mmap_base = TASK_UNMAPPED_BASE;
 		mm->get_unmapped_area = arch_get_unmapped_area;
-		mm->unmap_area = arch_unmap_area;
 	} else {
 		mm->mmap_base = mmap_base();
 		mm->get_unmapped_area = arch_get_unmapped_area_topdown;
-		mm->unmap_area = arch_unmap_area_topdown;
 	}
 }
 
@@ -103,18 +101,12 @@ void arch_pick_mmap_layout(struct mm_struct *mm)
 
 int s390_mmap_check(unsigned long addr, unsigned long len, unsigned long flags)
 {
-	int rc;
-
 	if (is_compat_task() || (TASK_SIZE >= (1UL << 53)))
 		return 0;
 	if (!(flags & MAP_FIXED))
 		addr = 0;
-	if ((addr + len) >= TASK_SIZE) {
-		rc = crst_table_upgrade(current->mm, 1UL << 53);
-		if (rc)
-			return rc;
-		update_mm(current->mm, current);
-	}
+	if ((addr + len) >= TASK_SIZE)
+		return crst_table_upgrade(current->mm, 1UL << 53);
 	return 0;
 }
 
@@ -134,7 +126,6 @@ s390_get_unmapped_area(struct file *filp, unsigned long addr,
 		rc = crst_table_upgrade(mm, 1UL << 53);
 		if (rc)
 			return (unsigned long) rc;
-		update_mm(mm, current);
 		area = arch_get_unmapped_area(filp, addr, len, pgoff, flags);
 	}
 	return area;
@@ -157,7 +148,6 @@ s390_get_unmapped_area_topdown(struct file *filp, const unsigned long addr,
 		rc = crst_table_upgrade(mm, 1UL << 53);
 		if (rc)
 			return (unsigned long) rc;
-		update_mm(mm, current);
 		area = arch_get_unmapped_area_topdown(filp, addr, len,
 						      pgoff, flags);
 	}
@@ -176,11 +166,9 @@ void arch_pick_mmap_layout(struct mm_struct *mm)
 	if (mmap_is_legacy()) {
 		mm->mmap_base = TASK_UNMAPPED_BASE;
 		mm->get_unmapped_area = s390_get_unmapped_area;
-		mm->unmap_area = arch_unmap_area;
 	} else {
 		mm->mmap_base = mmap_base();
 		mm->get_unmapped_area = s390_get_unmapped_area_topdown;
-		mm->unmap_area = arch_unmap_area_topdown;
 	}
 }
 

@@ -1,9 +1,7 @@
 /*******************************************************************************
  * This file contains main functions related to iSCSI Parameter negotiation.
  *
- * \u00a9 Copyright 2007-2011 RisingTide Systems LLC.
- *
- * Licensed to the Linux Foundation under the General Public License (GPL) version 2.
+ * (c) Copyright 2007-2013 Datera, Inc.
  *
  * Author: Nicholas A. Bellinger <nab@linux-iscsi.org>
  *
@@ -436,7 +434,7 @@ int iscsi_create_default_params(struct iscsi_param_list **param_list_ptr)
 	/*
 	 * Extra parameters for ISER from RFC-5046
 	 */
-	param = iscsi_set_default_param(pl, RDMAEXTENTIONS, INITIAL_RDMAEXTENTIONS,
+	param = iscsi_set_default_param(pl, RDMAEXTENSIONS, INITIAL_RDMAEXTENSIONS,
 			PHASE_OPERATIONAL, SCOPE_SESSION_WIDE, SENDER_BOTH,
 			TYPERANGE_BOOL_AND, USE_LEADING_ONLY);
 	if (!param)
@@ -529,7 +527,7 @@ int iscsi_set_keys_to_negotiate(
 			SET_PSTATE_NEGOTIATE(param);
 		} else if (!strcmp(param->name, OFMARKINT)) {
 			SET_PSTATE_NEGOTIATE(param);
-		} else if (!strcmp(param->name, RDMAEXTENTIONS)) {
+		} else if (!strcmp(param->name, RDMAEXTENSIONS)) {
 			if (iser == true)
 				SET_PSTATE_NEGOTIATE(param);
 		} else if (!strcmp(param->name, INITIATORRECVDATASEGMENTLENGTH)) {
@@ -580,7 +578,7 @@ int iscsi_set_keys_irrelevant_for_discovery(
 			param->state &= ~PSTATE_NEGOTIATE;
 		else if (!strcmp(param->name, OFMARKINT))
 			param->state &= ~PSTATE_NEGOTIATE;
-		else if (!strcmp(param->name, RDMAEXTENTIONS))
+		else if (!strcmp(param->name, RDMAEXTENSIONS))
 			param->state &= ~PSTATE_NEGOTIATE;
 		else if (!strcmp(param->name, INITIATORRECVDATASEGMENTLENGTH))
 			param->state &= ~PSTATE_NEGOTIATE;
@@ -758,9 +756,9 @@ static int iscsi_add_notunderstood_response(
 	}
 	INIT_LIST_HEAD(&extra_response->er_list);
 
-	strncpy(extra_response->key, key, strlen(key) + 1);
-	strncpy(extra_response->value, NOTUNDERSTOOD,
-			strlen(NOTUNDERSTOOD) + 1);
+	strlcpy(extra_response->key, key, sizeof(extra_response->key));
+	strlcpy(extra_response->value, NOTUNDERSTOOD,
+		sizeof(extra_response->value));
 
 	list_add_tail(&extra_response->er_list,
 			&param_list->extra_response_list);
@@ -1182,7 +1180,7 @@ static int iscsi_check_acceptor_state(struct iscsi_param *param, char *value,
 			unsigned long long tmp;
 			int rc;
 
-			rc = strict_strtoull(param->value, 0, &tmp);
+			rc = kstrtoull(param->value, 0, &tmp);
 			if (rc < 0)
 				return -1;
 
@@ -1629,8 +1627,6 @@ int iscsi_decode_text_input(
 
 		if (phase & PHASE_SECURITY) {
 			if (iscsi_check_for_auth_key(key) > 0) {
-				char *tmpptr = key + strlen(key);
-				*tmpptr = '=';
 				kfree(tmpbuf);
 				return 1;
 			}
@@ -1801,9 +1797,6 @@ void iscsi_set_connection_parameters(
 		 * this key is not sent over the wire.
 		 */
 		if (!strcmp(param->name, MAXXMITDATASEGMENTLENGTH)) {
-			if (param_list->iser == true)
-				continue;
-
 			ops->MaxXmitDataSegmentLength =
 				simple_strtoul(param->value, &tmpptr, 0);
 			pr_debug("MaxXmitDataSegmentLength:     %s\n",
@@ -1977,7 +1970,7 @@ void iscsi_set_session_parameters(
 			ops->SessionType = !strcmp(param->value, DISCOVERY);
 			pr_debug("SessionType:                  %s\n",
 				param->value);
-		} else if (!strcmp(param->name, RDMAEXTENTIONS)) {
+		} else if (!strcmp(param->name, RDMAEXTENSIONS)) {
 			ops->RDMAExtensions = !strcmp(param->value, YES);
 			pr_debug("RDMAExtensions:               %s\n",
 				param->value);

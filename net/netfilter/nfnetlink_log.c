@@ -419,6 +419,7 @@ __build_packet_message(struct nfnl_log_net *log,
 	nfmsg->version = NFNETLINK_V0;
 	nfmsg->res_id = htons(inst->group_num);
 
+	memset(&pmsg, 0, sizeof(pmsg));
 	pmsg.hw_protocol	= skb->protocol;
 	pmsg.hook		= hooknum;
 
@@ -498,7 +499,10 @@ __build_packet_message(struct nfnl_log_net *log,
 	if (indev && skb->dev &&
 	    skb->mac_header != skb->network_header) {
 		struct nfulnl_msg_packet_hw phw;
-		int len = dev_parse_header(skb, phw.hw_addr);
+		int len;
+
+		memset(&phw, 0, sizeof(phw));
+		len = dev_parse_header(skb, phw.hw_addr);
 		if (len > 0) {
 			phw.hw_addrlen = htons(len);
 			if (nla_put(inst->skb, NFULA_HWADDR, sizeof(phw), &phw))
@@ -602,7 +606,8 @@ static struct nf_loginfo default_loginfo = {
 
 /* log handler for internal netfilter logging api */
 void
-nfulnl_log_packet(u_int8_t pf,
+nfulnl_log_packet(struct net *net,
+		  u_int8_t pf,
 		  unsigned int hooknum,
 		  const struct sk_buff *skb,
 		  const struct net_device *in,
@@ -615,7 +620,6 @@ nfulnl_log_packet(u_int8_t pf,
 	const struct nf_loginfo *li;
 	unsigned int qthreshold;
 	unsigned int plen;
-	struct net *net = dev_net(in ? in : out);
 	struct nfnl_log_net *log = nfnl_log_pernet(net);
 
 	if (li_user && li_user->type == NF_LOG_TYPE_ULOG)
@@ -1045,7 +1049,9 @@ static int __net_init nfnl_log_net_init(struct net *net)
 
 static void __net_exit nfnl_log_net_exit(struct net *net)
 {
+#ifdef CONFIG_PROC_FS
 	remove_proc_entry("nfnetlink_log", net->nf.proc_netfilter);
+#endif
 }
 
 static struct pernet_operations nfnl_log_net_ops = {

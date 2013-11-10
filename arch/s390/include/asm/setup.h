@@ -33,8 +33,6 @@
 
 #define CHUNK_READ_WRITE 0
 #define CHUNK_READ_ONLY  1
-#define CHUNK_OLDMEM	 4
-#define CHUNK_CRASHK	 5
 
 struct mem_chunk {
 	unsigned long addr;
@@ -43,20 +41,12 @@ struct mem_chunk {
 };
 
 extern struct mem_chunk memory_chunk[];
-extern unsigned long real_memory_size;
 extern int memory_end_set;
 extern unsigned long memory_end;
 
-void detect_memory_layout(struct mem_chunk chunk[]);
-void create_mem_hole(struct mem_chunk memory_chunk[], unsigned long addr,
-		     unsigned long size, int type);
-
-#define PRIMARY_SPACE_MODE	0
-#define ACCESS_REGISTER_MODE	1
-#define SECONDARY_SPACE_MODE	2
-#define HOME_SPACE_MODE		3
-
-extern unsigned int s390_user_mode;
+void detect_memory_layout(struct mem_chunk chunk[], unsigned long maxsize);
+void create_mem_hole(struct mem_chunk mem_chunk[], unsigned long addr,
+		     unsigned long size);
 
 /*
  * Machine features detected in head.S

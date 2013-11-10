@@ -1425,7 +1425,7 @@ static int prism2_hw_init2(struct net_device *dev, int initial)
 		}
 		list_for_each(ptr, &local->hostap_interfaces) {
 			iface = list_entry(ptr, struct hostap_interface, list);
-			memcpy(iface->dev->dev_addr, dev->dev_addr, ETH_ALEN);
+			eth_hw_addr_inherit(iface->dev, dev);
 		}
 	} else if (local->fw_ap)
 		prism2_check_sta_fw_version(local);
@@ -2957,7 +2957,7 @@ static const struct file_operations prism2_registers_proc_fops = {
 	.open		= prism2_registers_proc_open,
 	.read		= seq_read,
 	.llseek		= seq_lseek,
-	.release	= seq_release,
+	.release	= single_release,
 };
 
 #endif /* PRISM2_NO_PROCFS_DEBUG */

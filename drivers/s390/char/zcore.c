@@ -30,8 +30,8 @@
 
 #define TRACE(x...) debug_sprintf_event(zcore_dbf, 1, x)
 
-#define TO_USER		0
-#define TO_KERNEL	1
+#define TO_USER		1
+#define TO_KERNEL	0
 #define CHUNK_INFO_SIZE	34 /* 2 16-byte char, each followed by blank */
 
 enum arch_id {
@@ -73,7 +73,7 @@ static struct ipl_parameter_block *ipl_block;
  * @count: Size of buffer, which should be copied
  * @mode:  Either TO_KERNEL or TO_USER
  */
-static int memcpy_hsa(void *dest, unsigned long src, size_t count, int mode)
+int memcpy_hsa(void *dest, unsigned long src, size_t count, int mode)
 {
 	int offs, blk_num;
 	static char buf[PAGE_SIZE] __attribute__((__aligned__(PAGE_SIZE)));
@@ -151,7 +151,7 @@ static int __init init_cpu_info(enum arch_id arch)
 
 	/* get info for boot cpu from lowcore, stored in the HSA */
 
-	sa = kmalloc(sizeof(*sa), GFP_KERNEL);
+	sa = dump_save_area_create(0);
 	if (!sa)
 		return -ENOMEM;
 	if (memcpy_hsa_kernel(sa, sys_info.sa_base, sys_info.sa_size) < 0) {
@@ -159,7 +159,6 @@ static int __init init_cpu_info(enum arch_id arch)
 		kfree(sa);
 		return -EIO;
 	}
-	zfcpdump_save_areas[0] = sa;
 	return 0;
 }
 
@@ -246,24 +245,25 @@ static int copy_lc(void __user *buf, void *sa, int sa_off, int len)
 static int zcore_add_lc(char __user *buf, unsigned long start, size_t count)
 {
 	unsigned long end;
-	int i = 0;
+	int i;
 
 	if (count == 0)
 		return 0;
 
 	end = start + count;
-	while (zfcpdump_save_areas[i]) {
+	for (i = 0; i < dump_save_areas.count; i++) {
 		unsigned long cp_start, cp_end; /* copy range */
 		unsigned long sa_start, sa_end; /* save area range */
 		unsigned long prefix;
 		unsigned long sa_off, len, buf_off;
+		struct save_area *save_area = dump_save_areas.areas[i];
 
-		prefix = zfcpdump_save_areas[i]->pref_reg;
+		prefix = save_area->pref_reg;
 		sa_start = prefix + sys_info.sa_base;
 		sa_end = prefix + sys_info.sa_base + sys_info.sa_size;
 
 		if ((end < sa_start) || (start > sa_end))
-			goto next;
+			continue;
 		cp_start = max(start, sa_start);
 		cp_end = min(end, sa_end);
 
@@ -272,10 +272,8 @@ static int zcore_add_lc(char __user *buf, unsigned long start, size_t count)
 		len = cp_end - cp_start;
 
 		TRACE("copy_lc for: %lx\n", start);
-		if (copy_lc(buf + buf_off, zfcpdump_save_areas[i], sa_off, len))
+		if (copy_lc(buf + buf_off, save_area, sa_off, len))
 			return -EFAULT;
-next:
-		i++;
 	}
 	return 0;
 }
@@ -426,7 +424,7 @@ static int zcore_memmap_open(struct inode *inode, struct file *filp)
 			      GFP_KERNEL);
 	if (!chunk_array)
 		return -ENOMEM;
-	detect_memory_layout(chunk_array);
+	detect_memory_layout(chunk_array, 0);
 	buf = kzalloc(MEMORY_CHUNKS * CHUNK_INFO_SIZE, GFP_KERNEL);
 	if (!buf) {
 		kfree(chunk_array);
@@ -557,7 +555,7 @@ static void __init set_lc_mask(struct save_area *map)
 /*
  * Initialize dump globals for a given architecture
  */
-static int __init sys_info_init(enum arch_id arch)
+static int __init sys_info_init(enum arch_id arch, unsigned long mem_end)
 {
 	int rc;
 
@@ -579,7 +577,7 @@ static int __init sys_info_init(enum arch_id arch)
 	rc = init_cpu_info(arch);
 	if (rc)
 		return rc;
-	sys_info.mem_size = real_memory_size;
+	sys_info.mem_size = mem_end;
 
 	return 0;
 }
@@ -601,7 +599,7 @@ static int __init check_sdias(void)
 	return 0;
 }
 
-static int __init get_mem_size(unsigned long *mem)
+static int __init get_mem_info(unsigned long *mem, unsigned long *end)
 {
 	int i;
 	struct mem_chunk *chunk_array;
@@ -610,44 +608,41 @@ static int __init get_mem_size(unsigned long *mem)
 			      GFP_KERNEL);
 	if (!chunk_array)
 		return -ENOMEM;
-	detect_memory_layout(chunk_array);
+	detect_memory_layout(chunk_array, 0);
 	for (i = 0; i < MEMORY_CHUNKS; i++) {
 		if (chunk_array[i].size == 0)
 			break;
 		*mem += chunk_array[i].size;
+		*end = max(*end, chunk_array[i].addr + chunk_array[i].size);
 	}
 	kfree(chunk_array);
 	return 0;
 }
 
-static int __init zcore_header_init(int arch, struct zcore_header *hdr)
+static void __init zcore_header_init(int arch, struct zcore_header *hdr,
+				     unsigned long mem_size)
 {
-	int rc, i;
-	unsigned long memory = 0;
 	u32 prefix;
+	int i;
 
 	if (arch == ARCH_S390X)
 		hdr->arch_id = DUMP_ARCH_S390X;
 	else
 		hdr->arch_id = DUMP_ARCH_S390;
-	rc = get_mem_size(&memory);
-	if (rc)
-		return rc;
-	hdr->mem_size = memory;
-	hdr->rmem_size = memory;
+	hdr->mem_size = mem_size;
+	hdr->rmem_size = mem_size;
 	hdr->mem_end = sys_info.mem_size;
-	hdr->num_pages = memory / PAGE_SIZE;
+	hdr->num_pages = mem_size / PAGE_SIZE;
 	hdr->tod = get_tod_clock();
 	get_cpu_id(&hdr->cpu_id);
-	for (i = 0; zfcpdump_save_areas[i]; i++) {
-		prefix = zfcpdump_save_areas[i]->pref_reg;
+	for (i = 0; i < dump_save_areas.count; i++) {
+		prefix = dump_save_areas.areas[i]->pref_reg;
 		hdr->real_cpu_cnt++;
 		if (!prefix)
 			continue;
 		hdr->lc_vec[hdr->cpu_cnt] = prefix;
 		hdr->cpu_cnt++;
 	}
-	return 0;
 }
 
 /*
@@ -682,9 +677,11 @@ static int __init zcore_reipl_init(void)
 
 static int __init zcore_init(void)
 {
+	unsigned long mem_size, mem_end;
 	unsigned char arch;
 	int rc;
 
+	mem_size = mem_end = 0;
 	if (ipl_info.type != IPL_TYPE_FCP_DUMP)
 		return -ENODATA;
 	if (OLDMEM_BASE)
@@ -727,13 +724,14 @@ static int __init zcore_init(void)
 	}
 #endif /* CONFIG_64BIT */
 
-	rc = sys_info_init(arch);
+	rc = get_mem_info(&mem_size, &mem_end);
 	if (rc)
 		goto fail;
 
-	rc = zcore_header_init(arch, &zcore_header);
+	rc = sys_info_init(arch, mem_end);
 	if (rc)
 		goto fail;
+	zcore_header_init(arch, &zcore_header, mem_size);
 
 	rc = zcore_reipl_init();
 	if (rc)

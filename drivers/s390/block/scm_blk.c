@@ -123,10 +123,9 @@ static int scm_open(struct block_device *blkdev, fmode_t mode)
 	return scm_get_ref();
 }
 
-static int scm_release(struct gendisk *gendisk, fmode_t mode)
+static void scm_release(struct gendisk *gendisk, fmode_t mode)
 {
 	scm_put_ref();
-	return 0;
 }
 
 static const struct block_device_operations scm_blk_devops = {
@@ -224,8 +223,12 @@ static void scm_blk_request(struct request_queue *rq)
 	int ret;
 
 	while ((req = blk_peek_request(rq))) {
-		if (req->cmd_type != REQ_TYPE_FS)
+		if (req->cmd_type != REQ_TYPE_FS) {
+			blk_start_request(req);
+			blk_dump_rq_flags(req, KMSG_COMPONENT " bad request");
+			blk_end_request_all(req, -EIO);
 			continue;
+		}
 
 		if (!scm_permit_request(bdev, req)) {
 			scm_ensure_queue_restart(bdev);

@@ -3,7 +3,7 @@
  *
  * This file contains the Storage Engine <-> FILEIO transport specific functions
  *
- * (c) Copyright 2005-2012 RisingTide Systems LLC.
+ * (c) Copyright 2005-2013 Datera, Inc.
  *
  * Nicholas A. Bellinger <nab@kernel.org>
  *
@@ -153,10 +153,7 @@ static int fd_configure_device(struct se_device *dev)
 		struct request_queue *q = bdev_get_queue(inode->i_bdev);
 		unsigned long long dev_size;
 
-		dev->dev_attrib.hw_block_size =
-			bdev_logical_block_size(inode->i_bdev);
-		dev->dev_attrib.hw_max_sectors = queue_max_hw_sectors(q);
-
+		fd_dev->fd_block_size = bdev_logical_block_size(inode->i_bdev);
 		/*
 		 * Determine the number of bytes from i_size_read() minus
 		 * one (1) logical sector from underlying struct block_device
@@ -203,9 +200,7 @@ static int fd_configure_device(struct se_device *dev)
 			goto fail;
 		}
 
-		dev->dev_attrib.hw_block_size = FD_BLOCKSIZE;
-		dev->dev_attrib.hw_max_sectors = FD_MAX_SECTORS;
-
+		fd_dev->fd_block_size = FD_BLOCKSIZE;
 		/*
 		 * Limit UNMAP emulation to 8k Number of LBAs (NoLB)
 		 */
@@ -224,8 +219,8 @@ static int fd_configure_device(struct se_device *dev)
 		dev->dev_attrib.max_write_same_len = 0x1000;
 	}
 
-	fd_dev->fd_block_size = dev->dev_attrib.hw_block_size;
-
+	dev->dev_attrib.hw_block_size = fd_dev->fd_block_size;
+	dev->dev_attrib.hw_max_sectors = FD_MAX_SECTORS;
 	dev->dev_attrib.hw_queue_depth = FD_MAX_DEVICE_QUEUE_DEPTH;
 
 	if (fd_dev->fbd_flags & FDBD_HAS_BUFFERED_IO_WCE) {
@@ -552,11 +547,9 @@ fd_execute_unmap(struct se_cmd *cmd)
 }
 
 static sense_reason_t
-fd_execute_rw(struct se_cmd *cmd)
+fd_execute_rw(struct se_cmd *cmd, struct scatterlist *sgl, u32 sgl_nents,
+	      enum dma_data_direction data_direction)
 {
-	struct scatterlist *sgl = cmd->t_data_sg;
-	u32 sgl_nents = cmd->t_data_nents;
-	enum dma_data_direction data_direction = cmd->data_direction;
 	struct se_device *dev = cmd->se_dev;
 	int ret = 0;
 
@@ -640,10 +633,10 @@ static ssize_t fd_set_configfs_dev_params(struct se_device *dev,
 				ret = -ENOMEM;
 				break;
 			}
-			ret = strict_strtoull(arg_p, 0, &fd_dev->fd_dev_size);
+			ret = kstrtoull(arg_p, 0, &fd_dev->fd_dev_size);
 			kfree(arg_p);
 			if (ret < 0) {
-				pr_err("strict_strtoull() failed for"
+				pr_err("kstrtoull() failed for"
 						" fd_dev_size=\n");
 				goto out;
 			}
@@ -699,11 +692,12 @@ static sector_t fd_get_blocks(struct se_device *dev)
 	 * to handle underlying block_device resize operations.
 	 */
 	if (S_ISBLK(i->i_mode))
-		dev_size = (i_size_read(i) - fd_dev->fd_block_size);
+		dev_size = i_size_read(i);
 	else
 		dev_size = fd_dev->fd_dev_size;
 
-	return div_u64(dev_size, dev->dev_attrib.block_size);
+	return div_u64(dev_size - dev->dev_attrib.block_size,
+		       dev->dev_attrib.block_size);
 }
 
 static struct sbc_ops fd_sbc_ops = {
